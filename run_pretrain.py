@@ -163,6 +163,7 @@ def modelarts_pre_process():
 def InitNetWithGrads(net_with_loss, optimizer):
     '''init net with grads'''
     if cfg.enable_lossscale == "true":
+        print("===here true")
         update_cell = DynamicLossScaleUpdateCell(loss_scale_value=cfg.loss_scale_value,
                                                  scale_factor=cfg.scale_factor,
                                                  scale_window=cfg.scale_window)
@@ -184,6 +185,7 @@ def InitNetWithGrads(net_with_loss, optimizer):
                                                    accumulation_steps=accumulation_steps,
                                                    enable_global_norm=enable_global_norm)
     else:
+        print("===here false")
         net_with_grads = BertTrainOneStepCell(net_with_loss, optimizer=optimizer, enable_clip_grad=True)
         if cfg.optimizer == "Thor":
             net_with_grads = BertTrainOneStepCell(net_with_loss, optimizer=optimizer, sens=cfg.Thor.loss_scale,
@@ -235,7 +237,7 @@ def run_pretrain():
                              cfg.bucket_list, cfg.dataset_format, cfg.num_samples)
     net_with_loss = BertNetworkWithLoss(bert_net_cfg)
     net_with_loss.to_float(mstype.float16)
-
+    
     new_repeat_count = cfg.epoch_size * ds.get_dataset_size() // cfg.data_sink_steps
     if cfg.train_steps > 0:
         train_steps = cfg.train_steps * cfg.accumulation_steps
@@ -245,17 +247,19 @@ def run_pretrain():
         logger.info("train steps: {}".format(cfg.train_steps))
 
     optimizer = _get_optimizer(cfg, net_with_loss)
-    callback = [TimeMonitor(cfg.data_sink_steps), LossCallBack(ds.get_dataset_size())]
+    callback = [TimeMonitor(cfg.data_sink_steps), LossCallBack(ds.get_dataset_size(), dataset_sink_mode=(cfg.enable_data_sink == "true"))]
+    print("===cfg.enable", cfg.enable_save_ckpt == "true")
     if cfg.enable_save_ckpt == "true" and cfg.device_id % min(8, device_num) == 0:
+        print("==",cfg.save_checkpoint_steps, cfg.save_checkpoint_num, ckpt_save_dir)
         config_ck = CheckpointConfig(save_checkpoint_steps=cfg.save_checkpoint_steps,
                                      keep_checkpoint_max=cfg.save_checkpoint_num)
         ckpoint_cb = ModelCheckpoint(prefix='checkpoint_bert',
                                      directory=None if ckpt_save_dir == "" else ckpt_save_dir, config=config_ck)
         callback.append(ckpoint_cb)
 
-    if cfg.load_checkpoint_path:
-        param_dict = load_checkpoint(cfg.load_checkpoint_path)
-        load_param_into_net(net_with_loss, param_dict)
+    # if cfg.load_checkpoint_path:
+    #     param_dict = load_checkpoint(cfg.load_checkpoint_path)
+    #     load_param_into_net(net_with_loss, param_dict)
 
     net_with_grads = InitNetWithGrads(net_with_loss, optimizer)
 
@@ -272,7 +276,7 @@ def run_pretrain():
     model = ConvertModelUtils().convert_to_thor_model(model, network=net_with_grads, optimizer=optimizer)
     model.train(new_repeat_count, ds, callbacks=callback,
                 dataset_sink_mode=(cfg.enable_data_sink == "true"), sink_size=cfg.data_sink_steps)
-
+    
 
 if __name__ == '__main__':
     set_seed(0)

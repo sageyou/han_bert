@@ -19,8 +19,10 @@ Functional Cells used in Bert finetune and evaluation.
 
 import os
 import math
+import logging
 import collections
 import numpy as np
+import mindspore as ms
 import mindspore.nn as nn
 from mindspore import log as logger
 from mindspore.ops import operations as P
@@ -29,6 +31,9 @@ from mindspore.common import dtype as mstype
 from mindspore.train.callback import Callback
 from mindspore.nn.metrics import Metric
 from mindspore.nn.learning_rate_schedule import LearningRateSchedule, PolynomialDecayLR, WarmUpLR
+
+logger = logging.getLogger(__name__)
+
 
 def finfo(dtype, attr="min"):
     """finfo api to get dtype attributes."""
@@ -101,9 +106,40 @@ class LossCallBack(Callback):
     Args:
         per_print_times (int): Print loss every times. Default: 1.
     """
-    def __init__(self, dataset_size=-1):
+    def __init__(self, dataset_size=-1, dataset_sink_mode=True):
         super(LossCallBack, self).__init__()
         self._dataset_size = dataset_size
+        self.dataset_sink_mode = dataset_sink_mode
+
+    def _get_optimizer_from_cbp(self, cb_params):
+        if cb_params.optimizer is not None:
+            optimizer = cb_params.optimizer
+        elif self.dataset_sink_mode:
+            optimizer = cb_params.train_network.network.optimizer
+        else:
+            optimizer = cb_params.train_network.optimizer
+        return optimizer
+
+    def _get_lr_from_cbp(self, cb_params):
+        optimizer = self._get_optimizer_from_cbp(cb_params)
+        if optimizer.global_step < 1:
+            logger.warning(
+                "`global_step` of optimizer is less than 1. It seems to be a overflow at the first step. "
+                "If you keep seeing this message, it means that the optimizer never actually called."
+            )
+            optim_step = Tensor((0,), mstype.int32)
+        else:  # if the optimizer is successfully called, the global_step will actually be the value of next step.
+            optim_step = optimizer.global_step - 1
+        if optimizer.dynamic_lr:
+            if isinstance(optimizer.learning_rate, ms.nn.CellList):
+                # return the learning rates of the first parameter if dynamic_lr
+                lr = optimizer.learning_rate[0](optim_step)[0]
+            else:
+                lr = optimizer.learning_rate(optim_step)[0]
+        else:
+            lr = optimizer.learning_rate
+        return lr
+
     def on_train_step_end(self, run_context):
         """
         Print loss after each step
@@ -114,8 +150,9 @@ class LossCallBack(Callback):
             if percent == 0:
                 percent = 1
                 epoch_num -= 1
-            print("epoch: {}, current epoch percent: {}, step: {}, outputs are {}"
-                  .format(int(epoch_num), "%.3f" % percent, cb_params.cur_step_num, str(cb_params.net_outputs)),
+            lr = self._get_lr_from_cbp(cb_params=cb_params)
+            print("epoch: {}, current epoch percent: {}, step: {}, lr: {}, outputs are {}"
+                  .format(int(epoch_num), "%.3f" % percent, cb_params.cur_step_num, "{:.6f}".format(lr.asnumpy()), str(cb_params.net_outputs)),
                   flush=True)
         else:
             print("epoch: {}, step: {}, outputs are {}".format(cb_params.cur_epoch_num, cb_params.cur_step_num,
